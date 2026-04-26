@@ -8,9 +8,9 @@ import json
 from datetime import date
 
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain.tools import tool
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from risk_scorer import (
     FarmerProfile,
@@ -122,23 +122,24 @@ def check_alert_threshold(score: float) -> str:
 
 if __name__ == "__main__":
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        temperature=0,
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-    )
+    llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0,
+    api_key=os.getenv("GROQ_API_KEY"),
+)
 
     tools = [get_weather_data, get_mandi_price, compute_risk_score,
              find_eligible_schemes, check_alert_threshold]
 
-    agent = create_react_agent(llm, tools)
+    agent = create_agent(llm, tools)
 
     print("\nStarting Distress Guardian assessment for Rajesh Patil...\n")
 
-    result = agent.invoke({
-        "messages": [{
-            "role": "user",
-            "content": """You are KisanMitra's Distress Guardian agent. Assess this farmer:
+    try:
+        result = agent.invoke({
+            "messages": [{
+                "role": "user",
+                "content": """You are KisanMitra's Distress Guardian agent. Assess this farmer:
 
 Farmer: Rajesh Patil (MH-WD-001)
 District: Wardha, State: Maharashtra
@@ -152,9 +153,86 @@ Do these steps in order:
 3. Call compute_risk_score with all the farmer details plus the numbers from steps 1 and 2
 4. Call find_eligible_schemes with crop='cotton'
 5. Call check_alert_threshold with the score from step 3
-6. Write a final summary with: score, severity, risk reasons, schemes to apply for, and whether officer alert is needed."""
-        }]
-    })
+6. Write a final summary in this exact format:
+
+### Farmer Distress Assessment: [Farmer Name] ([Farmer ID])
+
+**1. Risk Score & Severity**
+* **Risk Score:** [score]/100
+* **Severity:** [HIGH/MEDIUM/LOW]
+
+**2. Risk Factors**
+* **Climate Stress:** [actual]mm actual vs [normal]mm normal rainfall
+* **Market Risk:** Mandi price ₹[mandi] vs MSP ₹[msp]
+* **Debt Risk:** [description]
+* **Flags:** [comma-separated flags]
+
+**3. Recommended Government Schemes**
+* **[Scheme Name]:** [benefit description]
+* **[Scheme Name]:** [benefit description]
+* **[Scheme Name]:** [benefit description]
+
+**4. Officer Alert Status**
+* **Alert:** [YES/NO]
+* **Message:** [explanation]
+
+**5. Action Items**
+* [action 1]
+* [action 2]
+* [action 3]"""
+            }]
+        })
+    except Exception as e:
+        print(f"⚠️  Error occurred: {str(e)}")
+        if "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
+            print("⚠️  Gemini API quota exceeded. Running in offline mode with mock data...\n")
+            try:
+                # Simulate the agent workflow manually
+                weather = json.loads(get_weather_data.invoke({"district": "Wardha"}))
+                price = json.loads(get_mandi_price.invoke({"crop": "cotton", "district": "Wardha"}))
+                risk = json.loads(compute_risk_score.invoke({
+                    "farmer_id": "MH-WD-001", "name": "Rajesh Patil", "district": "Wardha", "state": "Maharashtra",
+                    "land_acres": 2.3, "primary_crop": "cotton", "crop_category": "cash crop",
+                    "loan_amount_inr": 120000, "lender_type": "moneylender", "annual_income_inr": 48000,
+                    "phone": "+919876543210", "normal_rainfall_mm": weather["actual_rainfall_mm"], "actual_rainfall_mm": weather["normal_rainfall_mm"],
+                    "season": weather["season"], "msp_inr_per_quintal": price["msp_inr_per_quintal"], "mandi_price_inr_per_quintal": price["mandi_price_inr_per_quintal"]
+                }))
+                schemes = json.loads(find_eligible_schemes.invoke({"crop": "cotton"}))
+                alert = json.loads(check_alert_threshold.invoke({"score": risk["total_score"]}))
+                
+                # Create mock result
+                result = {
+                    "messages": [{
+                        "content": f"""### Farmer Distress Assessment: Rajesh Patil (MH-WD-001)
+
+**1. Risk Score & Severity**
+*   **Risk Score:** {risk['total_score']}/100
+*   **Severity:** {'HIGH' if risk['total_score'] >= 50 else 'MEDIUM'}
+
+**2. Risk Factors**
+*   **Climate Stress:** {weather['actual_rainfall_mm']}mm actual vs {weather['normal_rainfall_mm']}mm normal rainfall
+*   **Market Risk:** Mandi price ₹{price['mandi_price_inr_per_quintal']} vs MSP ₹{price['msp_inr_per_quintal']}
+*   **Debt Risk:** High-interest loan from moneylender
+*   **Flags:** {', '.join(risk['flags'])}
+
+**3. Recommended Government Schemes**
+{chr(10).join(f"*   **{s['name']}:** {s['benefit']}" for s in schemes)}
+
+**4. Officer Alert Status**
+*   **Alert:** {'YES' if alert['alert'] else 'NO'}
+*   **Message:** {alert['message']}
+
+**5. Action Items**
+*   Monitor weather and market conditions closely
+*   Consider transitioning to institutional credit
+*   Apply for eligible government schemes immediately"""
+                    }]
+                }
+            except Exception as offline_e:
+                print(f"Offline mode error: {offline_e}")
+                raise offline_e
+        else:
+            raise e
 
     print("\n" + "="*60)
     print("  DISTRESS GUARDIAN — FINAL ASSESSMENT")
@@ -162,7 +240,13 @@ Do these steps in order:
     # Extract the last message content
     messages = result.get("messages", [])
     for msg in reversed(messages):
-        if hasattr(msg, "content") and msg.content:
-            print(msg.content)
-            break
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        if content:
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        print(block["text"])
+            else:
+                print(content)
+                break
     print("="*60)
